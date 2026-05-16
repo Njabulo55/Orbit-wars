@@ -522,31 +522,20 @@ def plan_moves(world, deadline):
     horizon = 40
     reserve = {}
     timelines = {}
-    # Sum nearby enemy ships windowed by ETA — used for proactive defense.
     for p in world.my_planets:
         tl = simulate_planet(p, arrivals.get(p.id, []), world.player, horizon)
         timelines[p.id] = tl
-        # Proactive: collect (eta, ships) for each nearby enemy planet and take
-        # the strongest stacked window (multiple attackers arriving together).
-        threats = []
+        # Proactive: nearest enemy planet within ~15-turn strike range; reserve a fraction.
+        proactive = 0
         for ep in world.enemy_planets:
             d = math.hypot(p.x - ep.x, p.y - ep.y)
-            if d > 70:
+            if d > 60:
                 continue
             est_eta = d / fleet_speed(max(1, int(ep.ships)))
-            if est_eta > 22:
+            if est_eta > 18:
                 continue
-            threats.append((est_eta, int(ep.ships)))
-        threats.sort()
-        proactive = 0
-        # Stacked-window: enemies arriving within 5 turns of each other can pile on.
-        for i in range(len(threats)):
-            stacked = threats[i][1]
-            for j in range(i + 1, len(threats)):
-                if threats[j][0] - threats[i][0] <= 5:
-                    stacked += threats[j][1]
-            proactive = max(proactive, int(stacked * 0.40))
-        baseline = max(3, int(p.production * 3))
+            proactive = max(proactive, int(ep.ships * 0.30))
+        baseline = max(2, int(p.production * 2))
         reserve[p.id] = min(int(p.ships), max(tl["keep_needed"], proactive, baseline))
 
     # Available attack budget per source
