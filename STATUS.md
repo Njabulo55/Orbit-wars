@@ -1,43 +1,93 @@
-# Orbit Wars — Current State
+# Orbit Wars — Session Status
 
-## What's in the repo
+## TL;DR
 
-| File | Purpose |
-|------|---------|
-| `main.py` | New clean agent (v30 / v3). Simulation-driven planner, swept-pair-verified aim, comet bonus. ~700 lines. |
-| `v26.py` | Prior session's best — the Tamrazov+Ykhnkf hybrid with aim convergence fix. ~3400 lines. **Not on the ladder.** |
-| `run_validation.py` | Local h2h harness with seeded envs and Wilson CIs. |
-| `STATUS_after_v28.md` | Prior-session notes (recommended shipping v28; v28 code was never committed). |
+Three agents in the repo. The clean rewrite (`main.py`) is roughly tied with
+`v26.py` in head-to-head (50% wr at n=24). **Ship `v26.py` as `main.py`** —
+it already has the aim convergence fix on top of `v14.8` (which is what's
+currently on the ladder at 878 ELO) and is the lowest-risk upgrade.
 
-## Currently submitted on Kaggle
+## What was done this session
 
-**v14.8** — `878 ELO`. This is described in `STATUS_after_v28.md`; its source has the OOB / aim-convergence bug (60-85% off-board rate on non-converged shots).
+1. **Recovered context.** Read `STATUS_after_v28.md` (prior session notes).
+   `v28` referenced in that doc was never committed to the repo, so the
+   strongest agent available is `v26.py` (3428 lines).
 
-## Local validation so far (n=12, 500 steps, seeded)
+2. **Wrote a clean rewrite from scratch** (`main.py`, 700 lines) using the
+   real engine code as reference. Highlights:
+   - **Linear-T-search aim solver** with engine-equivalent swept-pair hit
+     verification (the prior aim returned non-verified guesses that often
+     went off-board).
+   - **Off-by-one fix in planet position prediction**: empirically verified
+     that at `obs.step=K` the planet is at `theta0 + ang_vel*(K-1)`, not `(K)`.
+     My code originally used `(K + future_t)` — one tick ahead of reality.
+     Fixed to `max(0, step + future_t - 1)`.
+   - Per-planet timeline simulation for defense reservation (matches the
+     engine's combat math: top-vs-second, ties annihilate).
+   - Distance-scaled chunky fleets, light proactive defense.
 
-| Challenger | vs v26 | Notes |
-|------------|--------|-------|
-| main v1 (initial) | **6W/6L = 50%** CI [25–75] | Cleaner code, simpler strategy |
-| main v2 (heavier defense) | 3W/9L = 25% CI [9–53] | Over-reserved → couldn't expand |
-| **main v3 (aim verified + comet bonus + v1 defense)** | _in progress_ | Current head |
+3. **Built a local validation harness** (`run_validation.py`) with seeded
+   environments and Wilson CIs.
 
-vs **starter agent** (1v1 sanity): **8W/0L** for v3.
+4. **Head-to-head benches (n=24 vs v26):**
 
-## Key findings
+| Variant | Description | Wins / Losses | Winrate |
+|---------|-------------|---------------|---------|
+| `main` v1 | Initial clean agent (no aim verification, no off-by-one fix) | 6 / 6 | 50% |
+| `main` v2 | + heavier defense (baseline=3×prod, stacked-window) | 3 / 9 | 25% |
+| `main` v3 | + swept-pair aim verification (off-by-one still wrong) | 4 / 8 | 33% |
+| `main` v4 | + off-by-one fix | 12 / 12 | **50%** |
 
-1. **The clean agent isn't clearly better than v26.** At ~50% wr vs v26, shipping it instead of v26 gives no improvement.
-2. **Heavy defense is harmful.** The 25% wr at v2 came from `baseline = 3*prod` choking expansion. Reverted.
-3. **Aim solver had bugs.** Original `main.py` used a wide tolerance band that approved off-board paths. v3 now verifies hits using the engine's swept-pair geometry. This is a real correctness improvement.
-4. **Comets, snipe, gang-up, swarm — all missing in main.py.** v26 has them; replicating each is substantial work.
+The clean rewrite is **competitive but not clearly better** than v26.
 
-## Strategic options for top-10
+5. **Tried `submission_v26plus.py`** = v26 with comet up-weight (`COMET_VALUE_MULT`
+   0.65→1.50). Preliminary: 0W/2L vs v26. The down-weight was deliberate;
+   over-chasing comets exposes planets. Recommended to NOT ship.
 
-**Option A — Ship v3 to Kaggle now.** Clean codebase, aim correctness improvement. Risk: roughly tied with v26 in local h2h, so unclear lift vs v14.8.
+## Why the clean rewrite didn't win decisively
 
-**Option B — Backport the swept-pair-verified aim into v26 and ship that.** Single targeted change to a strong base. Lowest risk, predictable improvement.
+v26 has many sophisticated, well-tuned strategic features that take days to
+replicate and tune:
+- Snipe missions (intercept enemy attacks on neutrals)
+- Multi-source coordinated swarm (2- and 3-source attacks on hostile planets)
+- Crash exploit (4P-specific)
+- Gang-up missions (post-battle clean-up)
+- Rescue / recapture for my planets
+- Reinforce to hold
+- Elimination missions for weakest enemy
+- Total-war endgame
+- Doomed planet evacuation
+- Rear forwarding
 
-**Option C — Add v29-A comet anticipation to v26 and ship.** Per `STATUS_after_v28.md`, this is the biggest expected structural gain (~5-10% wr).
+The clean rewrite captures the **core 70%** (planning, defense, capture
+sizing, aim correctness) in 1/5 the line count. With another full session it
+could close the gap; for now, v26 is the safer ship.
 
-**Option D — Iterate on main.py: add snipe/swarm/gang-up.** Several days of work to match v26's tuning; uncertain timeline.
+## Concrete next steps to push toward top-10
 
-My recommendation: **B + C combined**, packaged as `submission.py` derived from `v26.py`. That gives a tuned strategic base + the off-board fix + the unimplemented comet structural improvement. Predictable +5-10% on `v14.8`'s ELO baseline.
+1. **Submit `v26.py`** as `main.py` to Kaggle. Estimated ladder lift: +50 to
+   +100 ELO vs v14.8 (based on STATUS_after_v28.md's report of v20c at 62%
+   wr vs v14.8 — v26 has the same structure with the aim convergence fix).
+
+2. **(Parallel)** Submit `main.py` (clean v4) too. Kaggle rates the latest 2.
+   Ladder data will tell us if the cleaner aim verification is worth the
+   missing strategic features.
+
+3. **Backport `main.py`'s swept-pair aim verification + off-by-one fix into
+   `v26.py`** as v26.1. The off-by-one might exist there too (v26's
+   `predict_planet_position` uses `cur_ang` from current position which
+   should be correct, but worth checking). Single-line change with potentially
+   measurable lift.
+
+4. **Implement v29-A from `STATUS_after_v28.md` properly:** comet anticipation.
+   Not just a value multiplier — actually pre-position fleets in each
+   quadrant in anticipation of spawn at steps 49 / 149 / 249 / 349 / 449.
+   This is the biggest unimplemented structural improvement.
+
+5. **Sweep instrumentation + offensive sweep parking** (v29-B from STATUS).
+   Drop fleets in front of orbiting planets so the planet sweeps into the
+   fleet — free combat without travel cost.
+
+6. **Combat-aware target reservation in v26's `is_target_saturated`.** v26
+   currently only checks defender; should also check if an enemy fleet in
+   flight would tie/beat our incoming under top-vs-second math.
