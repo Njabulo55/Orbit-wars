@@ -150,7 +150,14 @@ class World:
     # -- target position prediction --
 
     def target_pos_at(self, target_id, future_t):
-        """Return (x, y) of target at current_step + future_t. None if comet expired."""
+        """Return (x, y) of target at end of (engine step + future_t).
+
+        Engine quirk: at obs.step=K the planet position corresponds to
+        theta0 + ang_vel*(K-1) (planet positions lag obs.step by 1).
+        So after `future_t` ticks of engine processing, the planet will be at
+        theta0 + ang_vel * (self.step + future_t - 1).
+        Returns None if comet is past its path.
+        """
         if target_id in self._comet_path:
             path, idx = self._comet_path[target_id]
             i = idx + int(future_t)
@@ -165,9 +172,8 @@ class World:
         if static:
             p = self.planet_by_id[target_id]
             return (p.x, p.y)
-        # engine: current_angle = theta0 + ang_vel * step  (where step advances each tick).
-        # So position after `future_t` ticks from now:
-        ang = theta0 + self.ang_vel * (self.step + future_t)
+        effective_step = max(0, self.step + future_t - 1)
+        ang = theta0 + self.ang_vel * effective_step
         return (CENTER + r * math.cos(ang), CENTER + r * math.sin(ang))
 
     def comet_life_left(self, target_id):
