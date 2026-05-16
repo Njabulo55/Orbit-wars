@@ -60,6 +60,26 @@ def sun_blocked(ax, ay, bx, by, safety=SUN_SAFETY):
     return _seg_to_point(CENTER, CENTER, ax, ay, bx, by) < SUN_R + safety
 
 
+def _swept_pair_hit(ax, ay, bx, by, p0x, p0y, p1x, p1y, r):
+    """Engine-equivalent: do fleet segment (A->B) and planet segment (P0->P1)
+    come within `r` of each other for some t in [0, 1]?"""
+    d0x, d0y = ax - p0x, ay - p0y
+    dvx = (bx - ax) - (p1x - p0x)
+    dvy = (by - ay) - (p1y - p0y)
+    a = dvx * dvx + dvy * dvy
+    b = 2.0 * (d0x * dvx + d0y * dvy)
+    c = d0x * d0x + d0y * d0y - r * r
+    if a < 1e-12:
+        return c <= 0.0
+    disc = b * b - 4.0 * a * c
+    if disc < 0.0:
+        return False
+    sq = math.sqrt(disc)
+    t1 = (-b - sq) / (2.0 * a)
+    t2 = (-b + sq) / (2.0 * a)
+    return t2 >= 0.0 and t1 <= 1.0
+
+
 def is_static_orbit(init_x, init_y, radius):
     r = math.hypot(init_x - CENTER, init_y - CENTER)
     return r + radius >= ROTATION_LIMIT
@@ -161,6 +181,9 @@ class World:
     def aim(self, src, target_id, ships):
         """Smallest arrival turn T (>=1) and launch angle for fleet of `ships`.
         Returns (angle, T, (tx, ty)) or None.
+
+        Verifies the result via swept-pair geometry (matches engine collision
+        detection) and refuses paths that leave the board or cross the sun.
         """
         key = (src.id, target_id, int(ships))
         if key in self._aim_cache:
@@ -173,7 +196,6 @@ class World:
         if max_t < 1:
             self._aim_cache[key] = None
             return None
-        # target radius for hit tolerance
         tgt_p = self.planet_by_id.get(target_id)
         if tgt_p is None:
             self._aim_cache[key] = None
@@ -185,22 +207,33 @@ class World:
             if pos is None:
                 continue
             tx, ty = pos
-            d = math.hypot(tx - sx, ty - sy)
-            usable = d - sr - LAUNCH_CLEARANCE
-            if usable < 0:
+            # Aim straight at predicted end-of-turn position
+            angle = math.atan2(ty - sy, tx - sx)
+            cos_a, sin_a = math.cos(angle), math.sin(angle)
+            launch_x = sx + cos_a * (sr + LAUNCH_CLEARANCE)
+            launch_y = sy + sin_a * (sr + LAUNCH_CLEARANCE)
+            # Fleet positions at start and end of turn T (from launch_pt origin)
+            fleet_T_start_x = launch_x + cos_a * (T - 1) * speed
+            fleet_T_start_y = launch_y + sin_a * (T - 1) * speed
+            fleet_T_end_x = launch_x + cos_a * T * speed
+            fleet_T_end_y = launch_y + sin_a * T * speed
+            # Reject if path leaves the board
+            if not (0 <= fleet_T_end_x <= BOARD and 0 <= fleet_T_end_y <= BOARD):
                 continue
-            # Fleet at end of turn T sits at distance T*speed from launch point.
-            # Need usable in [T*speed - tgt_r, T*speed + tgt_r] (i.e. arrives within tgt radius this turn).
-            forward = T * speed
-            if forward + tgt_r + 0.1 >= usable >= max(0, forward - speed - tgt_r):
-                angle = math.atan2(ty - sy, tx - sx)
-                # Sun avoidance: check actual flown segment
-                ex = sx + math.cos(angle) * (sr + LAUNCH_CLEARANCE + min(forward, usable + tgt_r))
-                ey = sy + math.sin(angle) * (sr + LAUNCH_CLEARANCE + min(forward, usable + tgt_r))
-                lx = sx + math.cos(angle) * (sr + LAUNCH_CLEARANCE)
-                ly = sy + math.sin(angle) * (sr + LAUNCH_CLEARANCE)
-                if sun_blocked(lx, ly, ex, ey):
-                    continue
+            # Reject if path crosses sun (anywhere along [launch, end_of_T])
+            if sun_blocked(launch_x, launch_y, fleet_T_end_x, fleet_T_end_y):
+                continue
+            # Target positions at start and end of turn T (engine sweeps planet from
+            # angle@(step+T-1) to angle@(step+T) during turn step+T).
+            prev_pos = self.target_pos_at(target_id, T - 1) if T >= 1 else (tgt_p.x, tgt_p.y)
+            if prev_pos is None:
+                continue
+            ptx, pty = prev_pos
+            # Verify swept-pair hit during turn T (matches engine math).
+            if _swept_pair_hit(
+                fleet_T_start_x, fleet_T_start_y, fleet_T_end_x, fleet_T_end_y,
+                ptx, pty, tx, ty, tgt_r,
+            ):
                 result = (angle, T, (tx, ty))
                 break
         self._aim_cache[key] = result
@@ -361,10 +394,47 @@ def simulate_planet(planet, arrivals, player, horizon):
     }
 
 
+def owner_at_turn(planet, arrivals, horizon):
+    """Fast version of simulate_planet that only computes (owner, ships) at the
+    end of `horizon`. No keep_needed binary search."""
+    by_turn = defaultdict(list)
+    for eta, owner, ships in arrivals:
+        eta = max(1, int(math.ceil(eta)))
+        if eta <= horizon and ships > 0:
+            by_turn[eta].append((owner, ships))
+    owner = planet.owner
+    garrison = float(planet.ships)
+    for t in range(1, horizon + 1):
+        if owner != -1:
+            garrison += planet.production
+        events = by_turn.get(t)
+        if not events:
+            continue
+        per_owner = defaultdict(int)
+        for o, s in events:
+            per_owner[o] += s
+        sorted_p = sorted(per_owner.items(), key=lambda kv: -kv[1])
+        top_o, top_s = sorted_p[0]
+        if len(sorted_p) > 1 and sorted_p[1][1] == top_s:
+            surv_o, surv_s = -1, 0
+        elif len(sorted_p) > 1:
+            surv_o, surv_s = top_o, top_s - sorted_p[1][1]
+        else:
+            surv_o, surv_s = top_o, top_s
+        if surv_s > 0:
+            if owner == surv_o:
+                garrison += surv_s
+            else:
+                garrison -= surv_s
+                if garrison < 0:
+                    owner = surv_o
+                    garrison = -garrison
+    return owner, max(0.0, garrison)
+
+
 def projected_state_at(planet, arrivals, player, t):
-    """Run simulate_planet up to t turns, return (owner, ships) at end."""
-    tl = simulate_planet(planet, arrivals, player, t)
-    return tl["owner_at"].get(t, planet.owner), tl["ships_at"].get(t, float(planet.ships))
+    """Owner & ships at end of turn t given arrivals (alias for owner_at_turn)."""
+    return owner_at_turn(planet, arrivals, t)
 
 
 def capture_cost(target, arrivals, player, arrival_turn):
@@ -413,7 +483,8 @@ def target_value(target, world, arrival_turn):
     life = world.remaining - arrival_turn
     if life <= 0:
         return 0.0
-    if target.id in world.comet_ids:
+    is_comet = target.id in world.comet_ids
+    if is_comet:
         life = min(life, world.comet_life_left(target.id) - arrival_turn)
         if life <= 0:
             return 0.0
@@ -424,11 +495,16 @@ def target_value(target, world, arrival_turn):
         value *= 1.25
     # Enemy planets worth more (capturing removes their production)
     if target.owner not in (-1, world.player):
-        value *= 1.7
-        # weakest-enemy elimination bonus
+        value *= 1.8
         weakest = _weakest_enemy(world)
         if weakest is not None and target.owner == weakest:
             value *= 1.35 if world.is_4p else 1.2
+    # Comets: short-lived but cheap to grab; denial value is real.
+    if is_comet:
+        # 1 production for `life` turns + denial bonus (the opponent would have
+        # gotten it otherwise). Add a flat bonus so they out-score boring far
+        # neutrals when nearby.
+        value += 25
     return value
 
 
@@ -446,24 +522,31 @@ def plan_moves(world, deadline):
     horizon = 40
     reserve = {}
     timelines = {}
+    # Sum nearby enemy ships windowed by ETA — used for proactive defense.
     for p in world.my_planets:
         tl = simulate_planet(p, arrivals.get(p.id, []), world.player, horizon)
         timelines[p.id] = tl
-        # Three sources of reserve:
-        #  (a) ships needed to survive the simulated timeline
-        #  (b) proactive: fraction of nearby enemy ships within ~15-turn strike range
-        #  (c) baseline: don't leave the planet empty (production-scaled)
-        proactive = 0
+        # Proactive: collect (eta, ships) for each nearby enemy planet and take
+        # the strongest stacked window (multiple attackers arriving together).
+        threats = []
         for ep in world.enemy_planets:
             d = math.hypot(p.x - ep.x, p.y - ep.y)
-            if d > 60:
+            if d > 70:
                 continue
-            # rough ETA at enemy fleet speed assuming they send everything
             est_eta = d / fleet_speed(max(1, int(ep.ships)))
-            if est_eta > 18:
+            if est_eta > 22:
                 continue
-            proactive = max(proactive, int(ep.ships * 0.30))
-        baseline = max(2, int(p.production * 2))
+            threats.append((est_eta, int(ep.ships)))
+        threats.sort()
+        proactive = 0
+        # Stacked-window: enemies arriving within 5 turns of each other can pile on.
+        for i in range(len(threats)):
+            stacked = threats[i][1]
+            for j in range(i + 1, len(threats)):
+                if threats[j][0] - threats[i][0] <= 5:
+                    stacked += threats[j][1]
+            proactive = max(proactive, int(stacked * 0.40))
+        baseline = max(3, int(p.production * 3))
         reserve[p.id] = min(int(p.ships), max(tl["keep_needed"], proactive, baseline))
 
     # Available attack budget per source
