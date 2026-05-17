@@ -1,6 +1,4 @@
-# v28 = v27 + MCTS-lite plan evaluation (post-greedy forward simulation).
-# v27 = v26 + kingmaker(4P) + OOB/sun aim safety.
-# Local h2h: v27 vs v26 n=24 = 62.5%, v28 vs v27 n=16 = 56% (CI wide but no regression).
+# v14.8 merged - Tamrazov+Ykhnkf hybrid + Memex + dynamic hyperparameters + reinforce-to-hold
 from collections import defaultdict
 MEMEX_ARCHIVE = defaultdict(list)
 MEMEX_SUMMARIES = {}
@@ -537,46 +535,6 @@ def _aim_with_prediction_raw(src, target, ships, initial_by_id, ang_vel, comets,
     return search_safe_intercept(
         src, target, ships, initial_by_id, ang_vel, comets, comet_ids,
     )
-
-
-def _v28_evaluate_plan_outcome(world, moves, horizon=20):
-    """v28: project (my_total_ships, max_enemy_total_ships) at `horizon` turns
-    assuming `moves` are launched this tick. Per-planet timeline simulation,
-    no opponent-move modeling (conservative — assumes opponent does nothing).
-
-    Returns (my_total, max_enemy_total).
-    """
-    extra_by_target = defaultdict(list)
-    for src_id, angle, ships in moves:
-        src = world.planet_by_id.get(src_id)
-        if src is None or ships <= 0:
-            continue
-        start_x = src.x + math.cos(angle) * (src.radius + LAUNCH_CLEARANCE)
-        start_y = src.y + math.sin(angle) * (src.radius + LAUNCH_CLEARANCE)
-        fleet = Fleet(-1, world.player, start_x, start_y, angle, src_id, int(ships))
-        tgt_planet, eta = fleet_target_planet(fleet, world.planets)
-        if tgt_planet is not None and eta is not None and eta <= horizon:
-            extra_by_target[tgt_planet.id].append((eta, world.player, int(ships)))
-
-    outgoing = defaultdict(int)
-    for src_id, _, ships in moves:
-        if ships > 0:
-            outgoing[src_id] += int(ships)
-
-    totals = defaultdict(float)
-    for p in world.planets:
-        eff_ships = max(0, int(p.ships) - outgoing.get(p.id, 0)) if p.owner == world.player else int(p.ships)
-        modified = Planet(p.id, p.owner, p.x, p.y, p.radius, eff_ships, p.production)
-        all_arrivals = list(world.arrivals_by_planet.get(p.id, [])) + extra_by_target.get(p.id, [])
-        timeline = simulate_planet_timeline(modified, all_arrivals, world.player, horizon)
-        terminal_owner = timeline["owner_at"].get(horizon, modified.owner)
-        terminal_ships = timeline["ships_at"].get(horizon, eff_ships)
-        if terminal_owner != -1:
-            totals[terminal_owner] += terminal_ships
-
-    my_total = totals.get(world.player, 0.0)
-    enemy_max = max((s for o, s in totals.items() if o != world.player), default=0.0)
-    return my_total, enemy_max
 
 
 def aim_with_prediction(src, target, ships, initial_by_id, ang_vel, comets, comet_ids):
@@ -3505,38 +3463,7 @@ def plan_moves(world, deadline=None):
                 append_move(src.id, angle, atk_left)
             break  # Only run primary targets set; secondary is backup
 
-    # v28: MCTS-lite plan evaluation. After greedy planning produced `moves`,
-    # project (my_total, max_enemy_total) at horizon=20 and check whether
-    # dropping the last 1, 2, or 3 moves (least-priority by execution order)
-    # gives a better projected differential. If yes, use the better plan.
-    # This catches cases where v26's greedy commits to attacks that leak
-    # too much defense / fail without contributing.
-    default_moves = finalize_moves()
-    if (
-        len(default_moves) >= 2
-        and not world.is_very_late
-        and time_left() > 0.05  # need ~50ms headroom for evaluation
-    ):
-        try:
-            default_my, default_enemy = _v28_evaluate_plan_outcome(world, default_moves, horizon=20)
-            best_moves = default_moves
-            best_score = default_my - default_enemy
-            # Try alternates: drop tail moves (least-priority by execution order).
-            for k in (1, 2, 3):
-                if len(default_moves) <= k:
-                    break
-                alt = default_moves[:-k]
-                alt_my, alt_enemy = _v28_evaluate_plan_outcome(world, alt, horizon=20)
-                alt_score = alt_my - alt_enemy
-                # Require meaningful improvement to override default (avoid noise).
-                if alt_score > best_score + 8:
-                    best_moves = alt
-                    best_score = alt_score
-            return best_moves
-        except Exception:
-            # If anything goes wrong, fall back to default plan — no regression.
-            return default_moves
-    return default_moves
+    return finalize_moves()
 
 # ============================================================
 # Agent Entry Point

@@ -1,6 +1,4 @@
-# v28 = v27 + MCTS-lite plan evaluation (post-greedy forward simulation).
-# v27 = v26 + kingmaker(4P) + OOB/sun aim safety.
-# Local h2h: v27 vs v26 n=24 = 62.5%, v28 vs v27 n=16 = 56% (CI wide but no regression).
+# v14.8 merged - Tamrazov+Ykhnkf hybrid + Memex + dynamic hyperparameters + reinforce-to-hold
 from collections import defaultdict
 MEMEX_ARCHIVE = defaultdict(list)
 MEMEX_SUMMARIES = {}
