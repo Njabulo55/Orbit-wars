@@ -1,3 +1,8 @@
 __pycache__/
 *.pyc
 results_*/
+# Training artifacts — these belong in Kaggle's /kaggle/working/, not the repo
+train_log.jsonl
+*.pt
+weights.npz
+replays/
